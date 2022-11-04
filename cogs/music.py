@@ -34,7 +34,12 @@ ytdl = youtube_dl.YoutubeDL(ytdl_format_options)
 async def search_yt_videos(title: str) -> list:
     search = VideosSearch(title, limit=5)
     results = await search.next()
-    return results["result"]
+    return results["result"][:5]
+
+
+async def get_yt_title_by_url(url: str) -> str:
+    results = await search_yt_videos(url)
+    return results[0]["title"]
 
 
 class YTDLSource(discord.PCMVolumeTransformer):
@@ -64,30 +69,43 @@ class MusicCog(commands.Cog):
         self.bot = bot
         self.options_message = None
         self.voice_client = None
-        self.printer.start()
+        self.ctx = None
+        self.loop_task = None
+        self.song_list = []
 
     @tasks.loop(seconds=5.0)
-    async def printer(self):
+    async def loop(self):
         if self.voice_client:
-            print(self.voice_client.is_playing())
+            if not self.voice_client.is_playing():
+                await self.play_next()
+
+    async def play_next(self):
+        if self.song_list:
+            print(f"play_next {self.song_list}")
+            url = self.song_list.pop(0)
+            player = await YTDLSource.from_url(url, loop=self.bot.loop, stream=True)
+            self.voice_client.play(player, after=lambda e: print(f'Player error: {e}') if e else None)
+            await self.ctx.channel.send(f'playing {url}')
 
     @commands.hybrid_command()
-    async def search(self, ctx: commands, *, title):
+    async def search(self, ctx: commands.Context, *, title):
         """Search youtube for a song"""
         search_results = await search_yt_videos(title)
+        print(len(search_results))
+        if not search_results:
+            await ctx.send(f'not found', ephemeral=True)
+            return
         select = Select(placeholder="songs", options=[
             discord.SelectOption(label=x["title"], value=x["link"]) for x in search_results
         ])
 
         async def song_selected_callback(interaction: discord.Interaction):
-            if self.voice_client.is_playing():
-                self.voice_client.stop()
             url = interaction.data["values"][0]
-            player = await YTDLSource.from_url(url, loop=self.bot.loop, stream=True)
-            self.voice_client.play(player, after=lambda e: print(f'Player error: {e}') if e else None)
-            await interaction.response.send_message(f'{interaction.user.display_name} playing {url}')
+            self.song_list.append(url)
             await self.options_message.delete()
             self.options_message = None
+            await ctx.channel.send(f'{url} added to queue by by {ctx.message.author.display_name}')
+
         select.callback = song_selected_callback
         view = View()
         view.add_item(select)
@@ -98,11 +116,15 @@ class MusicCog(commands.Cog):
         """Plays from a url (almost anything youtube_dl supports)"""
 
         async with ctx.typing():
-            if self.voice_client.is_playing():
-                self.voice_client.stop()
-            player = await YTDLSource.from_url(url, loop=self.bot.loop, stream=True)
-            self.voice_client.play(player, after=lambda e: print(f'Player error: {e}') if e else None)
-        await ctx.send(f'{ctx.message.author.display_name} playing: {url}')
+            self.song_list.append(url)
+        await ctx.channel.send(f'{url} added to queue by {ctx.message.author.display_name}')
+
+    @commands.hybrid_command()
+    async def next(self, ctx):
+        """Skip to next song if available"""
+        if self.voice_client:
+            self.voice_client.stop()
+        await ctx.send('next')
 
     @commands.hybrid_command()
     async def volume(self, ctx, volume: int):
@@ -114,13 +136,16 @@ class MusicCog(commands.Cog):
         self.voice_client.source.volume = volume / 100
         await ctx.send(f"Changed volume to {volume}%")
 
-    @commands.hybrid_command()
+    @commands.hybrid_command(aliases=["dis"])
     async def stop(self, ctx):
         """Stops and disconnects the bot from voice"""
         if self.voice_client:
             await self.voice_client.disconnect()
-        await ctx.send(f"{ctx.message.author.display_name} stopped {self.bot.user}")
+        await ctx.send(f"{ctx.message.author.display_name} stopped {self.bot.user.display_name}")
         self.voice_client = None
+        self.loop.cancel()
+        self.loop_task = None
+        self.song_list.clear()
 
     @search.before_invoke
     @play.before_invoke
@@ -128,9 +153,12 @@ class MusicCog(commands.Cog):
         if self.options_message is not None:
             await self.options_message.delete()
             self.options_message = None
+        if not self.loop_task:
+            self.loop_task = self.loop.start()
         if ctx.voice_client is None:
             if ctx.author.voice:
                 await ctx.author.voice.channel.connect()
+                self.ctx = ctx
                 self.voice_client = ctx.voice_client
             else:
                 await ctx.send("You are not connected to a voice channel.")
