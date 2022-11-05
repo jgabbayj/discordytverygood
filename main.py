@@ -2,7 +2,8 @@ import discord
 import asyncio
 import os
 from discord.ext import commands
-
+from dotenv import load_dotenv
+load_dotenv()
 
 class MyBot(commands.Bot):
     def __init__(self, *args, **kwargs):
@@ -28,4 +29,4 @@ async def sync(ctx) -> None:
     res = await bot.tree.sync()
     await ctx.send(f"Synced {len(res)} commands.")
 
-bot.run(open("token.txt").read())
+bot.run(os.environ.get("TOKEN"))

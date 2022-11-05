@@ -1,6 +1,8 @@
 # This example requires the 'message_content' privileged intent to function.
 from youtubesearchpython.__future__ import VideosSearch
 
+import os
+from lyrics_extractor import SongLyrics
 import asyncio
 import discord
 import youtube_dl
@@ -42,6 +44,11 @@ async def get_yt_title_by_url(url: str) -> str:
     return results[0]["title"]
 
 
+async def get_lyrics(title):
+    extract_lyrics = SongLyrics(os.environ.get("CSJA_API_KEY"), os.environ.get("GCS_ENGINE_ID"))
+    return extract_lyrics.get_lyrics(title)["lyrics"]
+
+
 class YTDLSource(discord.PCMVolumeTransformer):
     def __init__(self, source, *, data, volume=0.5):
         super().__init__(source, volume)
@@ -72,6 +79,7 @@ class MusicCog(commands.Cog):
         self.ctx = None
         self.loop_task = None
         self.song_list = []
+        self.current_song = None
 
     @tasks.loop(seconds=5.0)
     async def loop(self):
@@ -80,9 +88,10 @@ class MusicCog(commands.Cog):
                 await self.play_next()
 
     async def play_next(self):
+        self.current_song = None
         if self.song_list:
             print(f"play_next {self.song_list}")
-            url = self.song_list.pop(0)
+            url, self.current_song = self.song_list.pop(0)[:2]
             player = await YTDLSource.from_url(url, loop=self.bot.loop, stream=True)
             self.voice_client.play(player, after=lambda e: print(f'Player error: {e}') if e else None)
             await self.ctx.channel.send(f'playing {url}')
@@ -91,20 +100,22 @@ class MusicCog(commands.Cog):
     async def search(self, ctx: commands.Context, *, title):
         """Search youtube for a song"""
         search_results = await search_yt_videos(title)
-        print(len(search_results))
         if not search_results:
             await ctx.send(f'not found', ephemeral=True)
             return
         select = Select(placeholder="songs", options=[
-            discord.SelectOption(label=x["title"], value=x["link"]) for x in search_results
+            discord.SelectOption(label=x["title"][:60]+" "+x["duration"], value=str(i)) for i, x in enumerate(search_results)
         ])
 
         async def song_selected_callback(interaction: discord.Interaction):
-            url = interaction.data["values"][0]
-            self.song_list.append(url)
+            item = search_results[int(interaction.data["values"][0])]
+            url = item["link"]
+            title = item["title"]
+            self.song_list.append((url, title))
+            print(self.song_list)
             await self.options_message.delete()
             self.options_message = None
-            await ctx.channel.send(f'{url} added to queue by by {ctx.message.author.display_name}')
+            await ctx.channel.send(f'{url} added to queue by {ctx.message.author.display_name}', delete_after = 5)
 
         select.callback = song_selected_callback
         view = View()
@@ -116,12 +127,21 @@ class MusicCog(commands.Cog):
         """Plays from a url (almost anything youtube_dl supports)"""
 
         async with ctx.typing():
-            self.song_list.append(url)
-        await ctx.channel.send(f'{url} added to queue by {ctx.message.author.display_name}')
+            title = await(get_yt_title_by_url(url))
+            self.song_list.append((url, title))
+            print(self.song_list)
+        await ctx.send(f'{url} added to queue by {ctx.message.author.display_name}', delete_after=5)
 
     @commands.hybrid_command()
     async def next(self, ctx):
-        """Skip to next song if available"""
+        """Skip to the next song"""
+        if self.voice_client:
+            self.voice_client.stop()
+        await ctx.send('skipping..', delete_after=1)
+
+    @commands.hybrid_command()
+    async def skip(self, ctx):
+        """Skip to the next song"""
         if self.voice_client:
             self.voice_client.stop()
         await ctx.send('next')
@@ -136,9 +156,10 @@ class MusicCog(commands.Cog):
         self.voice_client.source.volume = volume / 100
         await ctx.send(f"Changed volume to {volume}%")
 
-    @commands.hybrid_command(aliases=["dis"])
+    @commands.hybrid_command()
     async def stop(self, ctx):
         """Stops and disconnects the bot from voice"""
+
         if self.voice_client:
             await self.voice_client.disconnect()
         await ctx.send(f"{ctx.message.author.display_name} stopped {self.bot.user.display_name}")
@@ -146,6 +167,28 @@ class MusicCog(commands.Cog):
         self.loop.cancel()
         self.loop_task = None
         self.song_list.clear()
+
+    @commands.hybrid_command()
+    async def queue(self, ctx):
+        """Show songs in queue"""
+
+        if self.song_list:
+            await ctx.send("Songs in queue:\n"+"\n".join(x[1] for x in self.song_list), ephemeral=True)
+        else:
+            await ctx.send("No songs in queue", ephemeral=True)
+
+    @commands.hybrid_command()
+    async def lyrics(self, ctx):
+        """Display lyrics for song currently playing"""
+
+        if self.current_song:
+            title = self.current_song
+            print("lyrics of "+title)
+            lyrics = await get_lyrics(title)
+            await ctx.send(lyrics, ephemeral=True)
+        else:
+            await ctx.send("No song is playing", ephemeral=True)
+
 
     @search.before_invoke
     @play.before_invoke
